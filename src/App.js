@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -20,9 +20,9 @@ const DEFAULT_CATEGORIES = [
 ];
 
 const DEFAULT_TASKS = [
-  { id: 1, name: "Clean litter box", frequencyDays: 1, lastCompleted: null, createdAt: new Date().toISOString(), categoryId: "home", notes: "", streak: 0, order: 0 },
-  { id: 2, name: "Water the plants", frequencyDays: 3, lastCompleted: null, createdAt: new Date().toISOString(), categoryId: "home", notes: "", streak: 0, order: 1 },
-  { id: 3, name: "Take out trash", frequencyDays: 7, lastCompleted: null, createdAt: new Date().toISOString(), categoryId: "home", notes: "", streak: 0, order: 2 },
+  { id: 1, name: "Clean litter box", frequencyDays: 1, lastCompleted: null, createdAt: new Date().toISOString(), categoryId: "home", notes: "", streak: 0, order: 0, previousState: null },
+  { id: 2, name: "Water the plants", frequencyDays: 3, lastCompleted: null, createdAt: new Date().toISOString(), categoryId: "home", notes: "", streak: 0, order: 1, previousState: null },
+  { id: 3, name: "Take out trash", frequencyDays: 7, lastCompleted: null, createdAt: new Date().toISOString(), categoryId: "home", notes: "", streak: 0, order: 2, previousState: null },
 ];
 
 const COLOR_OPTIONS = [
@@ -30,6 +30,8 @@ const COLOR_OPTIONS = [
   "#06b6d4","#3b82f6","#6366f1","#8b5cf6","#ec4899","#f43f5e",
   "#a78bfa","#34d399","#60a5fa","#f472b6",
 ];
+
+const VERSION = "v1.4";
 
 // ─── Time helpers ─────────────────────────────────────────────────────────────
 
@@ -62,10 +64,12 @@ function isCompleted(task) {
 
 function getDaysOverdue(task) {
   if (isOneTime(task)) return 0;
-  const ref = task.lastCompleted
-    ? midnightsSinceCreation(task.lastCompleted)
-    : midnightsSinceCreation(task.createdAt);
-  return Math.max(0, ref - task.frequencyDays);
+  if (task.lastCompleted) {
+    // FIXED: use midnightsSinceCompletion (not creation) when task has been completed
+    return Math.max(0, midnightsSinceCompletion(task.lastCompleted) - task.frequencyDays);
+  }
+  // Never completed: use createdAt as baseline
+  return Math.max(0, midnightsSinceCreation(task.createdAt));
 }
 
 function getDaysUntilDue(task) {
@@ -110,18 +114,11 @@ function formatDate(isoStr) {
 
 // ─── Streak logic ─────────────────────────────────────────────────────────────
 
-function calcStreak(task) {
-  return task.streak || 0;
-}
-
 function updateStreak(task) {
-  // Called when completing a task. Check if it was completed on time.
   const overdue = getDaysOverdue(task);
-  const gracePeriod = task.frequencyDays === 1 ? 0 : 1; // daily = must be on time, others = 1 day grace
-  if (overdue <= gracePeriod) {
-    return (task.streak || 0) + 1;
-  }
-  return 0; // broke streak
+  const gracePeriod = task.frequencyDays === 1 ? 0 : 1;
+  if (overdue <= gracePeriod) return (task.streak || 0) + 1;
+  return 0;
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -135,10 +132,9 @@ function save(key, val) {
 
 function loadTasks() {
   const v3 = load("myroutine_tasks", null);
-  if (v3) return v3;
-  // migrate from old tasklog keys
+  if (v3) return v3.map(t => ({ previousState: null, ...t }));
   const old = load("tasklog_v3", null) || load("tasklog_v2", null);
-  if (old) return old.map((t, i) => ({ ...t, categoryId: null, notes: "", streak: 0, order: i }));
+  if (old) return old.map((t, i) => ({ ...t, categoryId: null, notes: "", streak: 0, order: i, previousState: null }));
   return DEFAULT_TASKS;
 }
 
@@ -186,29 +182,33 @@ export default function App() {
   const [tasks, setTasks] = useState(loadTasks);
   const [categories, setCategories] = useState(() => load("myroutine_cats", DEFAULT_CATEGORIES));
   const [dark, setDark] = useState(() => load("myroutine_dark", true));
-  const [filterCatId, setFilterCatId] = useState(null); // null = off
+
+  // Filters
+  const [filterCatIds, setFilterCatIds] = useState([]); // multi-select, empty = all
+  const [filterStatus, setFilterStatus] = useState(null); // null = off, or "critical"/"red"/"orange"/"yellow"/"green"
+
   const [completedOpen, setCompletedOpen] = useState(true);
   const [now, setNow] = useState(new Date());
 
   // Modals
   const [showAddTask, setShowAddTask] = useState(false);
   const [showFilter, setShowFilter] = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState(null); // task id
-  const [longPressTask, setLongPressTask] = useState(null); // task object
+  const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [longPressTask, setLongPressTask] = useState(null);
   const [showAddCat, setShowAddCat] = useState(false);
 
   // New task form
   const [newName, setNewName] = useState("");
   const [newFreqPreset, setNewFreqPreset] = useState(1);
   const [newCustomDays, setNewCustomDays] = useState(2);
-  const [newFreqMode, setNewFreqMode] = useState("preset"); // "preset" | "custom"
+  const [newFreqMode, setNewFreqMode] = useState("preset");
   const [newCatId, setNewCatId] = useState(null);
 
   // New category form
   const [newCatName, setNewCatName] = useState("");
   const [newCatColor, setNewCatColor] = useState(COLOR_OPTIONS[0]);
 
-  // Edit (in long press panel)
+  // Edit form
   const [editName, setEditName] = useState("");
   const [editFreqPreset, setEditFreqPreset] = useState(1);
   const [editCustomDays, setEditCustomDays] = useState(2);
@@ -226,7 +226,7 @@ export default function App() {
   useEffect(() => { save("myroutine_cats", categories); }, [categories]);
   useEffect(() => { save("myroutine_dark", dark); }, [dark]);
 
-  // Long press handler
+  // Long press
   const longPressTimer = useRef(null);
   const LONG_PRESS_MS = 1200;
 
@@ -241,24 +241,33 @@ export default function App() {
     setEditMode(false);
   }
 
-  // Long press on LEFT ZONE (colour bar + checkbox) → open edit panel
   function onLeftZonePressStart(e, task) {
     e.stopPropagation();
     longPressTimer.current = setTimeout(() => openEditPanel(task), LONG_PRESS_MS);
   }
-
-  // Rest of card → drag naturally (no timer needed)
   function onPressEnd() { clearTimeout(longPressTimer.current); }
 
+  // Toggle: tick saves previousState, untick restores it
   function toggleTask(id) {
     setTasks(prev => prev.map(t => {
       if (t.id !== id) return t;
       if (isCompleted(t)) {
+        // UNDO: restore previous state
         if (isOneTime(t)) return t;
-        return { ...t, lastCompleted: null };
+        if (t.previousState) {
+          return { ...t, lastCompleted: t.previousState.lastCompleted, streak: t.previousState.streak, previousState: null };
+        }
+        return { ...t, lastCompleted: null, previousState: null };
       }
+      // COMPLETE: save current state first
       const newStreak = updateStreak(t);
-      return { ...t, lastCompleted: new Date().toISOString(), streak: newStreak };
+      return {
+        ...t,
+        previousState: { lastCompleted: t.lastCompleted, streak: t.streak },
+        lastCompleted: new Date().toISOString(),
+        streak: newStreak,
+        order: 9999, // push to bottom of manual order on completion
+      };
     }));
   }
 
@@ -275,7 +284,7 @@ export default function App() {
       id: Date.now(), name: newName.trim(), frequencyDays: days,
       lastCompleted: null, createdAt: new Date().toISOString(),
       categoryId: newCatId, notes: "", streak: 0,
-      order: tasks.length,
+      order: tasks.length, previousState: null,
     };
     setTasks(prev => [...prev, newTask]);
     setNewName(""); setNewFreqPreset(1); setNewFreqMode("preset"); setNewCatId(null);
@@ -320,38 +329,56 @@ export default function App() {
     dragItem.current = null; dragOver.current = null;
   }
 
-  // Sorting
+  // Filter helpers
+  function toggleCatFilter(catId) {
+    setFilterCatIds(prev =>
+      prev.includes(catId) ? prev.filter(id => id !== catId) : [...prev, catId]
+    );
+  }
+  function toggleStatusFilter(status) {
+    setFilterStatus(prev => prev === status ? null : status);
+  }
+  function clearAllFilters() {
+    setFilterCatIds([]);
+    setFilterStatus(null);
+  }
+
+  // Sorting & filtering
   const activeTasks = tasks.filter(t => !isCompleted(t));
   const completedTasks = tasks.filter(t => isCompleted(t));
 
-  function sortActive(list) {
-    if (filterCatId) {
-      // filtered: sort by status within category
-      return [...list].filter(t => t.categoryId === filterCatId)
-        .sort((a,b) => {
-          const sa = getActiveStatus(a), sb = getActiveStatus(b);
-          if (sa !== sb) return STATUS_ORDER[sa] - STATUS_ORDER[sb];
-          return getDaysOverdue(b) - getDaysOverdue(a);
-        });
-    }
-    // unfiltered: manual order
-    return [...list].sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
+  function applyFilters(list) {
+    return list.filter(t => {
+      const catMatch = filterCatIds.length === 0 || filterCatIds.includes(t.categoryId);
+      const statusMatch = !filterStatus || getActiveStatus(t) === filterStatus;
+      return catMatch && statusMatch;
+    });
   }
 
-  const sortedActive = sortActive(activeTasks);
-  const sortedCompleted = [...completedTasks]
-    .filter(t => !filterCatId || t.categoryId === filterCatId)
-    .sort((a,b) => new Date(b.lastCompleted) - new Date(a.lastCompleted));
+  // Always sort by urgency (default), drag overrides order within same urgency
+  const sortedActive = [...activeTasks]
+    .sort((a, b) => {
+      const sa = getActiveStatus(a), sb = getActiveStatus(b);
+      if (sa !== sb) return STATUS_ORDER[sa] - STATUS_ORDER[sb];
+      return (a.order ?? 0) - (b.order ?? 0);
+    });
 
-  // Grouped by category (filter mode)
-  const groupedByCategory = filterCatId ? null : null; // not needed since we handle above
+  const filteredActive = applyFilters(sortedActive);
+
+  const sortedCompleted = [...completedTasks]
+    .filter(t => {
+      const catMatch = filterCatIds.length === 0 || filterCatIds.includes(t.categoryId);
+      return catMatch;
+    })
+    .sort((a, b) => new Date(b.lastCompleted) - new Date(a.lastCompleted));
 
   const counts = { critical:0, red:0, orange:0, yellow:0, green:0 };
   activeTasks.forEach(t => counts[getActiveStatus(t)]++);
 
-  // Theme classes
+  const hasFilters = filterCatIds.length > 0 || filterStatus !== null;
+
+  // Theme
   const bg = dark ? "bg-zinc-950 text-zinc-100" : "bg-zinc-50 text-zinc-900";
-  const cardBase = dark ? "bg-zinc-900 border-zinc-700" : "bg-white border-zinc-200";
   const subText = dark ? "text-zinc-500" : "text-zinc-900";
   const mutedText = dark ? "text-zinc-600" : "text-zinc-900";
   const inputCls = dark
@@ -381,12 +408,13 @@ export default function App() {
         }
         .pulse-critical { animation: pulseCritical 1.2s ease-in-out infinite; }
         .drag-over { opacity: 0.5; }
+        .filter-pill { cursor: pointer; transition: all 0.15s ease; }
+        .filter-pill:active { transform: scale(0.95); }
       `}</style>
 
       {/* ── Header ── */}
       <div className="max-w-lg mx-auto mb-8">
         <div className="flex items-start justify-between mb-1">
-          {/* Left: title + dark toggle */}
           <div className="flex items-center gap-3">
             <h1 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className="text-5xl">
               <span className={dark ? "text-zinc-100" : "text-zinc-800"}>MY</span>
@@ -398,12 +426,10 @@ export default function App() {
               {dark ? "☀️" : "🌙"}
             </button>
           </div>
-
-          {/* Right: filter, date, + */}
           <div className="flex flex-col items-end gap-0.5">
             <button onClick={() => setShowFilter(true)}
-              className={`text-sm ${mutedText} hover:text-emerald-400 transition-colors`} title="Filter">
-              🔍
+              className={`text-sm ${filterCatIds.length > 0 ? "text-emerald-400" : mutedText} hover:text-emerald-400 transition-colors`} title="Filter categories">
+              🔍{filterCatIds.length > 0 ? ` ${filterCatIds.length}` : ""}
             </button>
             <span className={`${subText} text-xs`}>
               {now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
@@ -415,44 +441,82 @@ export default function App() {
           </div>
         </div>
 
-        {/* Active filter pill */}
-        {filterCatId && (
-          <div className="flex items-center gap-2 mt-2">
-            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: getCat(filterCatId)?.color }} />
-            <span className="text-xs text-emerald-400">{getCat(filterCatId)?.name}</span>
-            <button onClick={() => setFilterCatId(null)} className={`text-xs ${mutedText} hover:text-red-400`}>× clear</button>
+        {/* Active filters row */}
+        {hasFilters && (
+          <div className="flex items-center gap-2 mt-2 flex-wrap">
+            {filterCatIds.map(id => {
+              const cat = getCat(id);
+              return cat ? (
+                <div key={id} className="flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-emerald-600/50 bg-emerald-950/30">
+                  <div className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
+                  <span className="text-xs text-emerald-400">{cat.name}</span>
+                  <button onClick={() => toggleCatFilter(id)} className="text-xs text-emerald-600 hover:text-red-400 ml-0.5">×</button>
+                </div>
+              ) : null;
+            })}
+            {filterStatus && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-emerald-600/50 bg-emerald-950/30">
+                <span className="text-xs text-emerald-400 capitalize">{filterStatus}</span>
+                <button onClick={() => setFilterStatus(null)} className="text-xs text-emerald-600 hover:text-red-400 ml-0.5">×</button>
+              </div>
+            )}
+            <button onClick={clearAllFilters} className={`text-xs ${mutedText} hover:text-red-400 transition-colors`}>clear all</button>
           </div>
         )}
 
         <div className={`h-px bg-gradient-to-r from-emerald-500/60 via-zinc-600/40 to-transparent my-3`} />
 
-        {/* Summary pills */}
+        {/* Summary pills — clickable to filter by lateness */}
         <div className="flex gap-2 flex-wrap text-xs">
-          {counts.critical > 0 && <span className="px-2 py-1 rounded bg-red-900/60 text-orange-300 border border-red-600/50">{counts.critical} critical</span>}
-          {counts.red > 0 && <span className="px-2 py-1 rounded bg-red-900/50 text-red-300 border border-red-700/40">{counts.red} overdue</span>}
-          {counts.orange > 0 && <span className="px-2 py-1 rounded bg-orange-900/50 text-orange-300 border border-orange-700/40">{counts.orange} late</span>}
-          {counts.yellow > 0 && <span className="px-2 py-1 rounded bg-yellow-900/50 text-yellow-300 border border-yellow-700/40">{counts.yellow} due soon</span>}
-          {counts.green > 0 && <span className="px-2 py-1 rounded bg-emerald-900/50 text-emerald-300 border border-emerald-700/40">{counts.green} on track</span>}
+          {counts.critical > 0 && (
+            <button onClick={() => toggleStatusFilter("critical")}
+              className={`filter-pill px-2 py-1 rounded border ${filterStatus === "critical" ? "bg-red-900/80 text-orange-200 border-red-500" : "bg-red-900/60 text-orange-300 border-red-600/50"}`}>
+              {counts.critical} critical
+            </button>
+          )}
+          {counts.red > 0 && (
+            <button onClick={() => toggleStatusFilter("red")}
+              className={`filter-pill px-2 py-1 rounded border ${filterStatus === "red" ? "bg-red-900/80 text-red-200 border-red-500" : "bg-red-900/50 text-red-300 border-red-700/40"}`}>
+              {counts.red} overdue
+            </button>
+          )}
+          {counts.orange > 0 && (
+            <button onClick={() => toggleStatusFilter("orange")}
+              className={`filter-pill px-2 py-1 rounded border ${filterStatus === "orange" ? "bg-orange-900/80 text-orange-200 border-orange-500" : "bg-orange-900/50 text-orange-300 border-orange-700/40"}`}>
+              {counts.orange} late
+            </button>
+          )}
+          {counts.yellow > 0 && (
+            <button onClick={() => toggleStatusFilter("yellow")}
+              className={`filter-pill px-2 py-1 rounded border ${filterStatus === "yellow" ? "bg-yellow-900/80 text-yellow-200 border-yellow-500" : "bg-yellow-900/50 text-yellow-300 border-yellow-700/40"}`}>
+              {counts.yellow} due soon
+            </button>
+          )}
+          {counts.green > 0 && (
+            <button onClick={() => toggleStatusFilter("green")}
+              className={`filter-pill px-2 py-1 rounded border ${filterStatus === "green" ? "bg-emerald-900/80 text-emerald-200 border-emerald-500" : "bg-emerald-900/50 text-emerald-300 border-emerald-700/40"}`}>
+              {counts.green} on track
+            </button>
+          )}
           {tasks.length === 0 && <span className={`${mutedText} py-1`}>No tasks yet</span>}
         </div>
       </div>
 
       {/* ── Task List ── */}
       <div className="max-w-lg mx-auto space-y-3">
-        {sortedActive.map(task => {
+        {filteredActive.map(task => {
           const status = getActiveStatus(task);
           const s = SS[status];
           const cat = getCat(task.categoryId);
           return (
             <div key={task.id}
-              draggable={!filterCatId}
+              draggable
               onDragStart={e => handleDragStart(e, task.id)}
               onDragEnter={e => handleDragEnter(e, task.id)}
               onDragEnd={handleDragEnd}
               onDragOver={e => e.preventDefault()}
               className={`task-card rounded-xl border px-3 py-4 shadow-md ${s.card} cursor-grab active:cursor-grabbing`}>
               <div className="flex items-center gap-2">
-                {/* LEFT ZONE: colour bar + checkbox — hold 1200ms to open edit panel */}
                 <div
                   onMouseDown={e => onLeftZonePressStart(e, task)}
                   onMouseUp={e => { e.stopPropagation(); onPressEnd(); }}
@@ -484,8 +548,10 @@ export default function App() {
           );
         })}
 
-        {sortedActive.length === 0 && tasks.length > 0 && (
-          <div className={`text-center ${mutedText} text-xs py-1`}>All tasks completed ✓</div>
+        {filteredActive.length === 0 && tasks.length > 0 && (
+          <div className={`text-center ${mutedText} text-xs py-1`}>
+            {hasFilters ? "No tasks match the current filter" : "All tasks completed ✓"}
+          </div>
         )}
 
         {/* ── Completed Section ── */}
@@ -507,7 +573,6 @@ export default function App() {
                   <div key={task.id}
                     className={`task-card rounded-xl border px-3 py-4 opacity-55 ${dark ? "border-zinc-800/50 bg-zinc-900/20" : "border-zinc-200 bg-zinc-100/50"}`}>
                     <div className="flex items-center gap-2">
-                      {/* LEFT ZONE: colour bar + checkbox — hold 1200ms to open edit panel */}
                       <div
                         onMouseDown={e => onLeftZonePressStart(e, task)}
                         onMouseUp={e => { e.stopPropagation(); onPressEnd(); }}
@@ -539,7 +604,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Add task button (bottom) ── */}
+        {/* ── Add task button ── */}
         <button onClick={() => setShowAddTask(true)}
           className={`w-full mt-2 py-3 rounded-xl border border-dashed ${dark ? "border-zinc-800 text-zinc-600 hover:border-emerald-700 hover:text-emerald-400 hover:bg-emerald-950/20" : "border-zinc-300 text-zinc-400 hover:border-emerald-500 hover:text-emerald-500 hover:bg-emerald-50"} text-sm transition-all`}>
           + New Task
@@ -555,6 +620,11 @@ export default function App() {
         <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500 inline-block pulse-critical" /> 4+ days late</span>
       </div>
 
+      {/* ── Version ── */}
+      <div className={`max-w-lg mx-auto mt-4 text-center text-xs ${dark ? "text-zinc-800" : "text-zinc-300"}`}>
+        {VERSION}
+      </div>
+
       {/* ══════════════════════════════════════════
           MODALS
       ══════════════════════════════════════════ */}
@@ -565,7 +635,6 @@ export default function App() {
           <div className={`${modalBg} border rounded-2xl p-6`}>
             <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${dark ? "text-zinc-100" : "text-zinc-800"}`}>NEW TASK</h2>
             <div className="space-y-4">
-              {/* Name */}
               <div>
                 <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Task name</label>
                 <input autoFocus value={newName} onChange={e => setNewName(e.target.value)}
@@ -573,11 +642,8 @@ export default function App() {
                   placeholder="e.g. Change bedding"
                   className={`w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none transition-colors ${inputCls}`} />
               </div>
-
-              {/* Frequency */}
               <div>
                 <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Frequency</label>
-                {/* Custom input at top */}
                 <div className={`flex items-center gap-2 mb-2 p-2.5 rounded-lg border cursor-pointer transition-colors ${newFreqMode === "custom" ? "border-emerald-500 bg-emerald-950/20" : dark ? "border-zinc-700 hover:border-zinc-500" : "border-zinc-200 hover:border-zinc-400"}`}
                   onClick={() => setNewFreqMode("custom")}>
                   <input type="radio" readOnly checked={newFreqMode === "custom"} className="accent-emerald-500" />
@@ -588,7 +654,6 @@ export default function App() {
                     className={`w-16 border rounded px-2 py-1 text-sm text-center focus:outline-none ${inputCls}`} />
                   <span className={`text-sm ${dark ? "text-zinc-300" : "text-zinc-700"}`}>days</span>
                 </div>
-                {/* Presets */}
                 <select value={newFreqMode === "preset" ? newFreqPreset : ""}
                   onChange={e => { setNewFreqMode("preset"); setNewFreqPreset(Number(e.target.value)); }}
                   onClick={() => setNewFreqMode("preset")}
@@ -596,10 +661,7 @@ export default function App() {
                   {PRESET_FREQUENCIES.map(f => <option key={f.days} value={f.days}>{f.label}</option>)}
                 </select>
               </div>
-
               {freqDays === 0 && <p className={`text-xs ${subText} ${dark ? "bg-zinc-800/60 border-zinc-700/50" : "bg-zinc-100 border-zinc-200"} rounded-lg px-3 py-2 border`}>One-time tasks stay completed permanently once checked off.</p>}
-
-              {/* Category */}
               <div>
                 <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Category</label>
                 <div className="flex flex-wrap gap-2">
@@ -629,26 +691,27 @@ export default function App() {
         </Modal>
       )}
 
-      {/* ── Filter Modal ── */}
+      {/* ── Filter Modal (category multi-select) ── */}
       {showFilter && (
         <Modal onClose={() => setShowFilter(false)}>
           <div className={`${modalBg} border rounded-2xl p-6`}>
             <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${dark ? "text-zinc-100" : "text-zinc-800"}`}>FILTER</h2>
             <div className="space-y-2">
-              <button onClick={() => { setFilterCatId(null); setShowFilter(false); }}
-                className={`w-full text-left px-3 py-2.5 rounded-lg border text-sm transition-colors ${!filterCatId ? "border-emerald-500 text-emerald-400" : dark ? "border-zinc-700 text-zinc-400 hover:border-zinc-500" : "border-zinc-200 text-zinc-500"}`}>
+              <button onClick={() => { setFilterCatIds([]); }}
+                className={`w-full text-left px-3 py-2.5 rounded-lg border text-sm transition-colors ${filterCatIds.length === 0 ? "border-emerald-500 text-emerald-400" : dark ? "border-zinc-700 text-zinc-400 hover:border-zinc-500" : "border-zinc-200 text-zinc-500"}`}>
                 All tasks
               </button>
               {categories.map(cat => (
-                <button key={cat.id} onClick={() => { setFilterCatId(cat.id); setShowFilter(false); }}
-                  className={`w-full text-left px-3 py-2.5 rounded-lg border text-sm transition-colors flex items-center gap-2 ${filterCatId === cat.id ? "border-emerald-500" : dark ? "border-zinc-700 hover:border-zinc-500" : "border-zinc-200"}`}>
+                <button key={cat.id} onClick={() => toggleCatFilter(cat.id)}
+                  className={`w-full text-left px-3 py-2.5 rounded-lg border text-sm transition-colors flex items-center gap-2 ${filterCatIds.includes(cat.id) ? "border-emerald-500" : dark ? "border-zinc-700 hover:border-zinc-500" : "border-zinc-200"}`}>
                   <span className="w-3 h-3 rounded-full" style={{ backgroundColor: cat.color }} />
                   <span className={dark ? "text-zinc-300" : "text-zinc-600"}>{cat.name}</span>
                   <span className={`ml-auto text-xs ${mutedText}`}>{tasks.filter(t => t.categoryId === cat.id).length}</span>
+                  {filterCatIds.includes(cat.id) && <span className="text-emerald-400 text-xs">✓</span>}
                 </button>
               ))}
             </div>
-            <button onClick={() => setShowFilter(false)} className={`w-full mt-4 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-100"} text-sm transition-colors`}>Close</button>
+            <button onClick={() => setShowFilter(false)} className={`w-full mt-4 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-100"} text-sm transition-colors`}>Done</button>
           </div>
         </Modal>
       )}
@@ -674,7 +737,6 @@ export default function App() {
           <div className={`${modalBg} border rounded-2xl p-6`}>
             {!editMode ? (
               <>
-                {/* Info view */}
                 <div className="flex items-start justify-between mb-4">
                   <div>
                     <h2 className={`text-base font-medium ${dark ? "text-zinc-100" : "text-zinc-800"}`}>{longPressTask.name}</h2>
@@ -686,11 +748,9 @@ export default function App() {
                     </span>
                   )}
                 </div>
-
                 <div className={`space-y-3 text-sm ${dark ? "text-zinc-300" : "text-zinc-600"}`}>
                   <div className={`flex justify-between py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
-                    <span className={subText}>Status</span>
-                    <span>{getDueLabel(longPressTask)}</span>
+                    <span className={subText}>Status</span><span>{getDueLabel(longPressTask)}</span>
                   </div>
                   <div className={`flex justify-between py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
                     <span className={subText}>Streak</span>
@@ -701,8 +761,7 @@ export default function App() {
                     <span>{longPressTask.lastCompleted ? formatDate(longPressTask.lastCompleted) : "Never"}</span>
                   </div>
                   <div className={`flex justify-between py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
-                    <span className={subText}>Created</span>
-                    <span>{formatDate(longPressTask.createdAt)}</span>
+                    <span className={subText}>Created</span><span>{formatDate(longPressTask.createdAt)}</span>
                   </div>
                   {longPressTask.notes && (
                     <div className={`py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
@@ -711,7 +770,6 @@ export default function App() {
                     </div>
                   )}
                 </div>
-
                 <div className="flex gap-2 mt-5">
                   <button onClick={() => setLongPressTask(null)} className={`flex-1 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-100"} text-sm transition-colors`}>Close</button>
                   <button onClick={() => setEditMode(true)} className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Edit</button>
@@ -719,7 +777,6 @@ export default function App() {
               </>
             ) : (
               <>
-                {/* Edit view */}
                 <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${dark ? "text-zinc-100" : "text-zinc-800"}`}>EDIT TASK</h2>
                 <div className="space-y-4">
                   <div>
