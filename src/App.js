@@ -31,7 +31,7 @@ const COLOR_OPTIONS = [
   "#a78bfa","#34d399","#60a5fa","#f472b6",
 ];
 
-const VERSION = "v1.4";
+const VERSION = "v1.5";
 
 // ─── Time helpers ─────────────────────────────────────────────────────────────
 
@@ -65,10 +65,8 @@ function isCompleted(task) {
 function getDaysOverdue(task) {
   if (isOneTime(task)) return 0;
   if (task.lastCompleted) {
-    // FIXED: use midnightsSinceCompletion (not creation) when task has been completed
     return Math.max(0, midnightsSinceCompletion(task.lastCompleted) - task.frequencyDays);
   }
-  // Never completed: use createdAt as baseline
   return Math.max(0, midnightsSinceCreation(task.createdAt));
 }
 
@@ -84,6 +82,11 @@ function getActiveStatus(task) {
   if (o === 2) return "orange";
   if (o === 3) return "red";
   return "critical";
+}
+
+function isDueTomorrow(task) {
+  if (isOneTime(task) || !isCompleted(task)) return false;
+  return getDaysUntilDue(task) === 1;
 }
 
 function getDueLabel(task) {
@@ -149,7 +152,7 @@ const SS = {
 };
 const STATUS_ORDER = { critical:0, red:1, orange:2, yellow:3, green:4 };
 
-// ─── Components ───────────────────────────────────────────────────────────────
+// ─── Small Components ─────────────────────────────────────────────────────────
 
 function Checkbox({ checked, status, onChange }) {
   const s = SS[status] || SS.green;
@@ -176,16 +179,37 @@ function Modal({ children, onClose }) {
   );
 }
 
+function ColourPicker({ value, onChange }) {
+  return (
+    <div className="grid grid-cols-8 gap-2">
+      {COLOR_OPTIONS.map(c => (
+        <button key={c} onClick={() => onChange(c)}
+          className={`w-7 h-7 rounded-full border-2 transition-all ${value === c ? "border-white scale-110" : "border-transparent"}`}
+          style={{ backgroundColor: c }} />
+      ))}
+    </div>
+  );
+}
+
+function GridIcon({ active }) {
+  return (
+    <div className="grid grid-cols-2 gap-0.5 w-3.5 h-3.5">
+      {[0,1,2,3].map(i => <div key={i} className={`rounded-sm ${active ? "bg-emerald-400" : "bg-zinc-500"}`} />)}
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [tasks, setTasks] = useState(loadTasks);
   const [categories, setCategories] = useState(() => load("myroutine_cats", DEFAULT_CATEGORIES));
   const [dark, setDark] = useState(() => load("myroutine_dark", true));
+  const [gridView, setGridView] = useState(() => load("myroutine_grid", false));
 
   // Filters
-  const [filterCatIds, setFilterCatIds] = useState([]); // multi-select, empty = all
-  const [filterStatus, setFilterStatus] = useState(null); // null = off, or "critical"/"red"/"orange"/"yellow"/"green"
+  const [filterCatIds, setFilterCatIds] = useState([]);
+  const [filterStatus, setFilterStatus] = useState(null);
 
   const [completedOpen, setCompletedOpen] = useState(true);
   const [now, setNow] = useState(new Date());
@@ -196,6 +220,10 @@ export default function App() {
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [longPressTask, setLongPressTask] = useState(null);
   const [showAddCat, setShowAddCat] = useState(false);
+  const [showCatManager, setShowCatManager] = useState(false);
+  const [editingCat, setEditingCat] = useState(null);
+  const [showTaskAssign, setShowTaskAssign] = useState(false);
+  const [assigningTask, setAssigningTask] = useState(null);
 
   // New task form
   const [newName, setNewName] = useState("");
@@ -208,7 +236,11 @@ export default function App() {
   const [newCatName, setNewCatName] = useState("");
   const [newCatColor, setNewCatColor] = useState(COLOR_OPTIONS[0]);
 
-  // Edit form
+  // Edit category form
+  const [editCatName, setEditCatName] = useState("");
+  const [editCatColor, setEditCatColor] = useState(COLOR_OPTIONS[0]);
+
+  // Edit task form
   const [editName, setEditName] = useState("");
   const [editFreqPreset, setEditFreqPreset] = useState(1);
   const [editCustomDays, setEditCustomDays] = useState(2);
@@ -225,8 +257,9 @@ export default function App() {
   useEffect(() => { save("myroutine_tasks", tasks); }, [tasks]);
   useEffect(() => { save("myroutine_cats", categories); }, [categories]);
   useEffect(() => { save("myroutine_dark", dark); }, [dark]);
+  useEffect(() => { save("myroutine_grid", gridView); }, [gridView]);
 
-  // Long press
+  // Long press (1200ms) on category tag / checkbox zone -> edit task panel
   const longPressTimer = useRef(null);
   const LONG_PRESS_MS = 1200;
 
@@ -247,26 +280,24 @@ export default function App() {
   }
   function onPressEnd() { clearTimeout(longPressTimer.current); }
 
-  // Toggle: tick saves previousState, untick restores it
+  // Toggle complete / undo
   function toggleTask(id) {
     setTasks(prev => prev.map(t => {
       if (t.id !== id) return t;
       if (isCompleted(t)) {
-        // UNDO: restore previous state
         if (isOneTime(t)) return t;
         if (t.previousState) {
           return { ...t, lastCompleted: t.previousState.lastCompleted, streak: t.previousState.streak, previousState: null };
         }
         return { ...t, lastCompleted: null, previousState: null };
       }
-      // COMPLETE: save current state first
       const newStreak = updateStreak(t);
       return {
         ...t,
         previousState: { lastCompleted: t.lastCompleted, streak: t.streak },
         lastCompleted: new Date().toISOString(),
         streak: newStreak,
-        order: 9999, // push to bottom of manual order on completion
+        order: 9999,
       };
     }));
   }
@@ -309,9 +340,33 @@ export default function App() {
     setShowAddCat(false);
   }
 
+  // ── Categories manager actions ──
+  function openEditCat(cat) {
+    setEditingCat(cat);
+    setEditCatName(cat.name);
+    setEditCatColor(cat.color);
+  }
+  function saveEditCat() {
+    setCategories(prev => prev.map(c => c.id === editingCat.id
+      ? { ...c, name: editCatName.trim() || c.name, color: editCatColor }
+      : c));
+    setEditingCat(null);
+  }
+  function deleteCat(id) {
+    setCategories(prev => prev.filter(c => c.id !== id));
+    setTasks(prev => prev.map(t => t.categoryId === id ? { ...t, categoryId: null } : t));
+    // remove from active filters too
+    setFilterCatIds(prev => prev.filter(cid => cid !== id));
+    setEditingCat(null);
+  }
+  function assignCat(taskId, catId) {
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, categoryId: catId } : t));
+    setAssigningTask(null);
+  }
+
   function getCat(catId) { return categories.find(c => c.id === catId) || null; }
 
-  // Drag handlers
+  // ── Drag handlers ──
   function handleDragStart(e, id) { dragItem.current = id; e.dataTransfer.effectAllowed = "move"; }
   function handleDragEnter(e, id) { dragOver.current = id; }
   function handleDragEnd() {
@@ -329,11 +384,9 @@ export default function App() {
     dragItem.current = null; dragOver.current = null;
   }
 
-  // Filter helpers
+  // ── Filter helpers ──
   function toggleCatFilter(catId) {
-    setFilterCatIds(prev =>
-      prev.includes(catId) ? prev.filter(id => id !== catId) : [...prev, catId]
-    );
+    setFilterCatIds(prev => prev.includes(catId) ? prev.filter(id => id !== catId) : [...prev, catId]);
   }
   function toggleStatusFilter(status) {
     setFilterStatus(prev => prev === status ? null : status);
@@ -343,7 +396,7 @@ export default function App() {
     setFilterStatus(null);
   }
 
-  // Sorting & filtering
+  // ── Sorting & filtering ──
   const activeTasks = tasks.filter(t => !isCompleted(t));
   const completedTasks = tasks.filter(t => isCompleted(t));
 
@@ -355,38 +408,48 @@ export default function App() {
     });
   }
 
-  // Always sort by urgency (default), drag overrides order within same urgency
-  const sortedActive = [...activeTasks]
-    .sort((a, b) => {
-      const sa = getActiveStatus(a), sb = getActiveStatus(b);
-      if (sa !== sb) return STATUS_ORDER[sa] - STATUS_ORDER[sb];
-      return (a.order ?? 0) - (b.order ?? 0);
-    });
-
+  const sortedActive = [...activeTasks].sort((a, b) => {
+    const sa = getActiveStatus(a), sb = getActiveStatus(b);
+    if (sa !== sb) return STATUS_ORDER[sa] - STATUS_ORDER[sb];
+    return (a.order ?? 0) - (b.order ?? 0);
+  });
   const filteredActive = applyFilters(sortedActive);
 
-  const sortedCompleted = [...completedTasks]
-    .filter(t => {
-      const catMatch = filterCatIds.length === 0 || filterCatIds.includes(t.categoryId);
-      return catMatch;
-    })
+  const completedFiltered = completedTasks.filter(t => filterCatIds.length === 0 || filterCatIds.includes(t.categoryId));
+  const completedDueTomorrow = completedFiltered.filter(t => isDueTomorrow(t))
     .sort((a, b) => new Date(b.lastCompleted) - new Date(a.lastCompleted));
+  const completedRest = completedFiltered.filter(t => !isDueTomorrow(t))
+    .sort((a, b) => new Date(b.lastCompleted) - new Date(a.lastCompleted));
+  const sortedCompleted = [...completedDueTomorrow, ...completedRest];
 
   const counts = { critical:0, red:0, orange:0, yellow:0, green:0 };
   activeTasks.forEach(t => counts[getActiveStatus(t)]++);
 
   const hasFilters = filterCatIds.length > 0 || filterStatus !== null;
 
-  // Theme
-  const bg = dark ? "bg-zinc-950 text-zinc-100" : "bg-zinc-50 text-zinc-900";
-  const subText = dark ? "text-zinc-500" : "text-zinc-900";
-  const mutedText = dark ? "text-zinc-600" : "text-zinc-900";
+  // ── Theme ──
+  const bg = dark ? "bg-zinc-950 text-zinc-100" : "bg-zinc-50 text-black";
+  const textMain = dark ? "text-zinc-100" : "text-black";
+  const textBody = dark ? "text-zinc-300" : "text-black";
+  const subText = dark ? "text-zinc-500" : "text-black";
+  const mutedText = dark ? "text-zinc-600" : "text-black";
   const inputCls = dark
     ? "bg-zinc-800 border-zinc-700 text-zinc-100 placeholder-zinc-600 focus:border-emerald-500"
-    : "bg-zinc-100 border-zinc-300 text-zinc-900 placeholder-zinc-500 focus:border-emerald-500";
+    : "bg-white border-zinc-300 text-black placeholder-zinc-400 focus:border-emerald-500";
   const modalBg = dark ? "bg-zinc-900 border-zinc-700" : "bg-white border-zinc-200";
+  const cardLineCls = dark ? "border-zinc-800" : "border-zinc-200";
+  const hoverPanel = dark ? "hover:bg-zinc-800" : "hover:bg-zinc-100";
+  const dashedBtn = dark
+    ? "border-zinc-800 text-zinc-600 hover:border-emerald-700 hover:text-emerald-400 hover:bg-emerald-950/20"
+    : "border-zinc-300 text-black hover:border-emerald-500 hover:bg-emerald-50";
+  const pillBorder = dark ? "border-zinc-700" : "border-zinc-300";
+  const dividerCls = dark ? "bg-zinc-800 group-hover:bg-zinc-700" : "bg-zinc-200 group-hover:bg-zinc-300";
 
   const freqDays = newFreqMode === "custom" ? Math.max(1, newCustomDays) : newFreqPreset;
+
+  // Uncategorised / grouped tasks for category manager
+  const uncatTasks = tasks.filter(t => !t.categoryId);
+  const catGroups = categories.map(c => ({ cat: c, tasks: tasks.filter(t => t.categoryId === c.id) })).filter(g => g.tasks.length > 0);
 
   return (
     <div style={{ fontFamily: "'DM Mono', 'Courier New', monospace" }} className={`min-h-screen ${bg} px-4 py-10 transition-colors duration-200`}>
@@ -407,9 +470,9 @@ export default function App() {
           50%{background-color:#f97316;box-shadow:0 0 10px #f97316aa;}
         }
         .pulse-critical { animation: pulseCritical 1.2s ease-in-out infinite; }
-        .drag-over { opacity: 0.5; }
         .filter-pill { cursor: pointer; transition: all 0.15s ease; }
         .filter-pill:active { transform: scale(0.95); }
+        .clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
       `}</style>
 
       {/* ── Header ── */}
@@ -417,7 +480,7 @@ export default function App() {
         <div className="flex items-start justify-between mb-1">
           <div className="flex items-center gap-3">
             <h1 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className="text-5xl">
-              <span className={dark ? "text-zinc-100" : "text-zinc-800"}>MY</span>
+              <span className={textMain}>MY</span>
               <span className="text-emerald-400">ROUTINE</span>
             </h1>
             <button onClick={() => setDark(d => !d)}
@@ -426,11 +489,22 @@ export default function App() {
               {dark ? "☀️" : "🌙"}
             </button>
           </div>
-          <div className="flex flex-col items-end gap-0.5">
-            <button onClick={() => setShowFilter(true)}
-              className={`text-sm ${filterCatIds.length > 0 ? "text-emerald-400" : mutedText} hover:text-emerald-400 transition-colors`} title="Filter categories">
-              🔍{filterCatIds.length > 0 ? ` ${filterCatIds.length}` : ""}
-            </button>
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-3">
+              <button onClick={() => setShowFilter(true)}
+                className={`text-sm ${filterCatIds.length > 0 ? "text-emerald-400" : mutedText} hover:text-emerald-400 transition-colors`} title="Filter categories">
+                🔍{filterCatIds.length > 0 ? ` ${filterCatIds.length}` : ""}
+              </button>
+              <button onClick={() => { setShowCatManager(true); setShowTaskAssign(false); setAssigningTask(null); }}
+                className={`text-xs px-2 py-1 rounded border ${pillBorder} ${mutedText} hover:border-emerald-600 hover:text-emerald-400 transition-colors`}
+                title="Manage categories">
+                Categories
+              </button>
+              <button onClick={() => setGridView(g => !g)} title="Toggle grid view"
+                className={`p-1.5 rounded border ${gridView ? "border-emerald-500" : pillBorder} hover:border-emerald-500 transition-colors`}>
+                <GridIcon active={gridView} />
+              </button>
+            </div>
             <span className={`${subText} text-xs`}>
               {now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
             </span>
@@ -466,7 +540,7 @@ export default function App() {
 
         <div className={`h-px bg-gradient-to-r from-emerald-500/60 via-zinc-600/40 to-transparent my-3`} />
 
-        {/* Summary pills — clickable to filter by lateness */}
+        {/* Summary pills */}
         <div className="flex gap-2 flex-wrap text-xs">
           {counts.critical > 0 && (
             <button onClick={() => toggleStatusFilter("critical")}
@@ -504,7 +578,9 @@ export default function App() {
 
       {/* ── Task List ── */}
       <div className="max-w-lg mx-auto space-y-3">
-        {filteredActive.map(task => {
+
+        {/* Active tasks: list or grid */}
+        {!gridView && filteredActive.map(task => {
           const status = getActiveStatus(task);
           const s = SS[status];
           const cat = getCat(task.categoryId);
@@ -529,7 +605,7 @@ export default function App() {
                   <Checkbox checked={false} status={status} onChange={() => toggleTask(task.id)} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className={`text-sm font-medium truncate ${dark ? "text-zinc-100" : "text-zinc-800"}`}>{task.name}</div>
+                  <div className={`text-sm font-medium truncate ${textMain}`}>{task.name}</div>
                   <div className="flex items-center gap-2 mt-1 flex-wrap">
                     <span className={`${subText} text-xs`}>{getFrequencyLabel(task.frequencyDays)}</span>
                     <span className={`text-xs px-1.5 py-0.5 rounded ${s.badge}`}>{getDueLabel(task)}</span>
@@ -539,7 +615,7 @@ export default function App() {
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <div className={`w-2.5 h-2.5 rounded-full ${s.dot} ${s.dotAnim}`} />
                   <button onClick={e => { e.stopPropagation(); setDeleteConfirm(task.id); }}
-                    className={`w-7 h-7 rounded-lg border ${dark ? "border-zinc-800 bg-zinc-900/60 text-zinc-600" : "border-zinc-200 bg-zinc-100 text-zinc-400"} flex items-center justify-center hover:text-red-400 hover:border-red-800 hover:bg-red-950/40 transition-colors text-lg leading-none`}>
+                    className={`w-7 h-7 rounded-lg border ${dark ? "border-zinc-800 bg-zinc-900/60 text-zinc-600" : "border-zinc-200 bg-zinc-100 text-black"} flex items-center justify-center hover:text-red-400 hover:border-red-800 hover:bg-red-950/40 transition-colors text-lg leading-none`}>
                     ×
                   </button>
                 </div>
@@ -547,6 +623,52 @@ export default function App() {
             </div>
           );
         })}
+
+        {/* Grid view */}
+        {gridView && filteredActive.length > 0 && (
+          <div className="grid grid-cols-2 gap-2.5">
+            {filteredActive.map(task => {
+              const status = getActiveStatus(task);
+              const s = SS[status];
+              const cat = getCat(task.categoryId);
+              return (
+                <div key={task.id}
+                  draggable
+                  onDragStart={e => handleDragStart(e, task.id)}
+                  onDragEnter={e => handleDragEnter(e, task.id)}
+                  onDragEnd={handleDragEnd}
+                  onDragOver={e => e.preventDefault()}
+                  className={`task-card relative rounded-xl border p-3 shadow-md ${s.card} cursor-grab active:cursor-grabbing flex flex-col gap-2 min-h-[92px]`}>
+                  <button onClick={e => { e.stopPropagation(); setDeleteConfirm(task.id); }}
+                    className={`absolute top-1.5 right-1.5 w-6 h-6 rounded-lg border ${dark ? "border-zinc-800 bg-zinc-900/60 text-zinc-600" : "border-zinc-200 bg-zinc-100 text-black"} flex items-center justify-center hover:text-red-400 hover:border-red-800 hover:bg-red-950/40 transition-colors text-base leading-none`}>
+                    ×
+                  </button>
+                  <div className="flex items-start gap-2 pr-6">
+                    <div
+                      onMouseDown={e => onLeftZonePressStart(e, task)}
+                      onMouseUp={e => { e.stopPropagation(); onPressEnd(); }}
+                      onMouseLeave={onPressEnd}
+                      onTouchStart={e => onLeftZonePressStart(e, task)}
+                      onTouchEnd={e => { e.stopPropagation(); onPressEnd(); }}
+                      className="flex items-center gap-2 self-stretch cursor-pointer"
+                      title="Hold to edit">
+                      <CategoryTag color={cat?.color} dark={dark} />
+                      <Checkbox checked={false} status={status} onChange={() => toggleTask(task.id)} />
+                    </div>
+                    <div className={`text-sm font-medium clamp2 ${textMain}`}>{task.name}</div>
+                  </div>
+                  <div className="flex items-center justify-between mt-auto">
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${s.badge}`}>{getDueLabel(task)}</span>
+                    <div className="flex items-center gap-1.5">
+                      {(task.streak || 0) > 0 && <span className="text-xs text-orange-400">🔥{task.streak}</span>}
+                      <div className={`w-2.5 h-2.5 rounded-full ${s.dot} ${s.dotAnim}`} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {filteredActive.length === 0 && tasks.length > 0 && (
           <div className={`text-center ${mutedText} text-xs py-1`}>
@@ -559,16 +681,20 @@ export default function App() {
           <div className="pt-1">
             <button onClick={() => setCompletedOpen(o => !o)}
               className="w-full flex items-center gap-3 py-1 group">
-              <div className={`flex-1 h-px ${dark ? "bg-zinc-800 group-hover:bg-zinc-700" : "bg-zinc-200 group-hover:bg-zinc-300"} transition-colors`} />
+              <div className={`flex-1 h-px ${dividerCls} transition-colors`} />
               <span className={`${mutedText} text-xs tracking-wider whitespace-nowrap group-hover:text-emerald-400 transition-colors flex items-center gap-1.5`}>
                 {completedOpen ? "∧" : "∨"} Completed ({sortedCompleted.length})
               </span>
-              <div className={`flex-1 h-px ${dark ? "bg-zinc-800 group-hover:bg-zinc-700" : "bg-zinc-200 group-hover:bg-zinc-300"} transition-colors`} />
+              <div className={`flex-1 h-px ${dividerCls} transition-colors`} />
             </button>
 
             <div className={`collapse-body ${completedOpen ? "open" : "closed"} space-y-3 mt-3`}>
               {sortedCompleted.map(task => {
                 const cat = getCat(task.categoryId);
+                const dueTomorrow = isDueTomorrow(task);
+                const badgeCls = dueTomorrow
+                  ? SS.green.badge
+                  : (dark ? "bg-zinc-800/80 text-zinc-500 border border-zinc-700/40" : "bg-zinc-200 text-black border border-zinc-300/40");
                 return (
                   <div key={task.id}
                     className={`task-card rounded-xl border px-3 py-4 opacity-55 ${dark ? "border-zinc-800/50 bg-zinc-900/20" : "border-zinc-200 bg-zinc-100/50"}`}>
@@ -585,15 +711,15 @@ export default function App() {
                         <Checkbox checked={true} status="green" onChange={() => toggleTask(task.id)} />
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className={`text-sm font-medium truncate line-through ${dark ? "text-zinc-500 decoration-zinc-600" : "text-zinc-400 decoration-zinc-300"}`}>{task.name}</div>
+                        <div className={`text-sm font-medium truncate line-through ${dark ? "text-zinc-500 decoration-zinc-600" : "text-black decoration-zinc-400"}`}>{task.name}</div>
                         <div className="flex items-center gap-2 mt-1 flex-wrap">
                           <span className={`${mutedText} text-xs`}>{getFrequencyLabel(task.frequencyDays)}</span>
-                          <span className={`text-xs px-1.5 py-0.5 rounded ${dark ? "bg-zinc-800/80 text-zinc-500 border border-zinc-700/40" : "bg-zinc-200 text-zinc-500 border border-zinc-300/40"}`}>{getDueLabel(task)}</span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded ${badgeCls}`}>{getDueLabel(task)}</span>
                           {task.lastCompleted && !isOneTime(task) && <span className={`text-xs ${mutedText}`}>· done at {formatTime(task.lastCompleted)}</span>}
                         </div>
                       </div>
                       <button onClick={e => { e.stopPropagation(); setDeleteConfirm(task.id); }}
-                        className={`w-7 h-7 flex-shrink-0 rounded-lg border ${dark ? "border-zinc-800 bg-zinc-900/60 text-zinc-700" : "border-zinc-200 bg-zinc-100 text-zinc-400"} flex items-center justify-center hover:text-red-400 hover:border-red-800 hover:bg-red-950/40 transition-colors text-lg leading-none`}>
+                        className={`w-7 h-7 flex-shrink-0 rounded-lg border ${dark ? "border-zinc-800 bg-zinc-900/60 text-zinc-700" : "border-zinc-200 bg-zinc-100 text-black"} flex items-center justify-center hover:text-red-400 hover:border-red-800 hover:bg-red-950/40 transition-colors text-lg leading-none`}>
                         ×
                       </button>
                     </div>
@@ -606,7 +732,7 @@ export default function App() {
 
         {/* ── Add task button ── */}
         <button onClick={() => setShowAddTask(true)}
-          className={`w-full mt-2 py-3 rounded-xl border border-dashed ${dark ? "border-zinc-800 text-zinc-600 hover:border-emerald-700 hover:text-emerald-400 hover:bg-emerald-950/20" : "border-zinc-300 text-zinc-400 hover:border-emerald-500 hover:text-emerald-500 hover:bg-emerald-50"} text-sm transition-all`}>
+          className={`w-full mt-2 py-3 rounded-xl border border-dashed ${dashedBtn} text-sm transition-all`}>
           + New Task
         </button>
       </div>
@@ -633,7 +759,7 @@ export default function App() {
       {showAddTask && (
         <Modal onClose={() => setShowAddTask(false)}>
           <div className={`${modalBg} border rounded-2xl p-6`}>
-            <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${dark ? "text-zinc-100" : "text-zinc-800"}`}>NEW TASK</h2>
+            <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${textMain}`}>NEW TASK</h2>
             <div className="space-y-4">
               <div>
                 <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Task name</label>
@@ -644,15 +770,15 @@ export default function App() {
               </div>
               <div>
                 <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Frequency</label>
-                <div className={`flex items-center gap-2 mb-2 p-2.5 rounded-lg border cursor-pointer transition-colors ${newFreqMode === "custom" ? "border-emerald-500 bg-emerald-950/20" : dark ? "border-zinc-700 hover:border-zinc-500" : "border-zinc-200 hover:border-zinc-400"}`}
+                <div className={`flex items-center gap-2 mb-2 p-2.5 rounded-lg border cursor-pointer transition-colors ${newFreqMode === "custom" ? "border-emerald-500 bg-emerald-950/20" : `${pillBorder} hover:border-zinc-500`}`}
                   onClick={() => setNewFreqMode("custom")}>
                   <input type="radio" readOnly checked={newFreqMode === "custom"} className="accent-emerald-500" />
-                  <span className={`text-sm ${dark ? "text-zinc-300" : "text-zinc-700"}`}>Every</span>
+                  <span className={`text-sm ${textBody}`}>Every</span>
                   <input type="number" min="1" max="365" value={newCustomDays}
                     onClick={e => { e.stopPropagation(); setNewFreqMode("custom"); }}
                     onChange={e => setNewCustomDays(Number(e.target.value))}
                     className={`w-16 border rounded px-2 py-1 text-sm text-center focus:outline-none ${inputCls}`} />
-                  <span className={`text-sm ${dark ? "text-zinc-300" : "text-zinc-700"}`}>days</span>
+                  <span className={`text-sm ${textBody}`}>days</span>
                 </div>
                 <select value={newFreqMode === "preset" ? newFreqPreset : ""}
                   onChange={e => { setNewFreqMode("preset"); setNewFreqPreset(Number(e.target.value)); }}
@@ -666,52 +792,52 @@ export default function App() {
                 <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Category</label>
                 <div className="flex flex-wrap gap-2">
                   <button onClick={() => setNewCatId(null)}
-                    className={`px-2.5 py-1 rounded-lg text-xs border transition-colors ${!newCatId ? "border-emerald-500 text-emerald-400" : dark ? "border-zinc-700 text-zinc-500 hover:border-zinc-500" : "border-zinc-200 text-zinc-400"}`}>
+                    className={`px-2.5 py-1 rounded-lg text-xs border transition-colors ${!newCatId ? "border-emerald-500 text-emerald-400" : `${pillBorder} ${mutedText} hover:border-zinc-500`}`}>
                     None
                   </button>
                   {categories.map(cat => (
                     <button key={cat.id} onClick={() => setNewCatId(cat.id)}
-                      className={`px-2.5 py-1 rounded-lg text-xs border transition-colors flex items-center gap-1.5 ${newCatId === cat.id ? "border-emerald-500" : dark ? "border-zinc-700 hover:border-zinc-500" : "border-zinc-200"}`}>
+                      className={`px-2.5 py-1 rounded-lg text-xs border transition-colors flex items-center gap-1.5 ${newCatId === cat.id ? "border-emerald-500" : `${pillBorder} hover:border-zinc-500`}`}>
                       <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
-                      <span className={dark ? "text-zinc-300" : "text-zinc-600"}>{cat.name}</span>
+                      <span className={textBody}>{cat.name}</span>
                     </button>
                   ))}
                   <button onClick={() => setShowAddCat(true)}
-                    className={`px-2.5 py-1 rounded-lg text-xs border border-dashed ${dark ? "border-zinc-700 text-zinc-600 hover:border-emerald-700 hover:text-emerald-400" : "border-zinc-300 text-zinc-400 hover:border-emerald-500"} transition-colors`}>
+                    className={`px-2.5 py-1 rounded-lg text-xs border border-dashed ${dashedBtn} transition-colors`}>
                     + New
                   </button>
                 </div>
               </div>
             </div>
             <div className="flex gap-2 mt-6">
-              <button onClick={() => setShowAddTask(false)} className={`flex-1 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-100"} text-sm transition-colors`}>Cancel</button>
+              <button onClick={() => setShowAddTask(false)} className={`flex-1 py-2.5 rounded-lg border ${pillBorder} ${mutedText} ${hoverPanel} text-sm transition-colors`}>Cancel</button>
               <button onClick={addTask} disabled={!newName.trim()} className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium transition-colors">Add Task</button>
             </div>
           </div>
         </Modal>
       )}
 
-      {/* ── Filter Modal (category multi-select) ── */}
+      {/* ── Filter Modal ── */}
       {showFilter && (
         <Modal onClose={() => setShowFilter(false)}>
           <div className={`${modalBg} border rounded-2xl p-6`}>
-            <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${dark ? "text-zinc-100" : "text-zinc-800"}`}>FILTER</h2>
+            <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${textMain}`}>FILTER</h2>
             <div className="space-y-2">
-              <button onClick={() => { setFilterCatIds([]); }}
-                className={`w-full text-left px-3 py-2.5 rounded-lg border text-sm transition-colors ${filterCatIds.length === 0 ? "border-emerald-500 text-emerald-400" : dark ? "border-zinc-700 text-zinc-400 hover:border-zinc-500" : "border-zinc-200 text-zinc-500"}`}>
+              <button onClick={() => setFilterCatIds([])}
+                className={`w-full text-left px-3 py-2.5 rounded-lg border text-sm transition-colors ${filterCatIds.length === 0 ? "border-emerald-500 text-emerald-400" : `${pillBorder} ${mutedText} hover:border-zinc-500`}`}>
                 All tasks
               </button>
               {categories.map(cat => (
                 <button key={cat.id} onClick={() => toggleCatFilter(cat.id)}
-                  className={`w-full text-left px-3 py-2.5 rounded-lg border text-sm transition-colors flex items-center gap-2 ${filterCatIds.includes(cat.id) ? "border-emerald-500" : dark ? "border-zinc-700 hover:border-zinc-500" : "border-zinc-200"}`}>
+                  className={`w-full text-left px-3 py-2.5 rounded-lg border text-sm transition-colors flex items-center gap-2 ${filterCatIds.includes(cat.id) ? "border-emerald-500" : `${pillBorder} hover:border-zinc-500`}`}>
                   <span className="w-3 h-3 rounded-full" style={{ backgroundColor: cat.color }} />
-                  <span className={dark ? "text-zinc-300" : "text-zinc-600"}>{cat.name}</span>
+                  <span className={textBody}>{cat.name}</span>
                   <span className={`ml-auto text-xs ${mutedText}`}>{tasks.filter(t => t.categoryId === cat.id).length}</span>
                   {filterCatIds.includes(cat.id) && <span className="text-emerald-400 text-xs">✓</span>}
                 </button>
               ))}
             </div>
-            <button onClick={() => setShowFilter(false)} className={`w-full mt-4 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-100"} text-sm transition-colors`}>Done</button>
+            <button onClick={() => setShowFilter(false)} className={`w-full mt-4 py-2.5 rounded-lg border ${pillBorder} ${mutedText} ${hoverPanel} text-sm transition-colors`}>Done</button>
           </div>
         </Modal>
       )}
@@ -721,10 +847,10 @@ export default function App() {
         <Modal onClose={() => setDeleteConfirm(null)}>
           <div className={`${modalBg} border rounded-2xl p-6 text-center`}>
             <div className="text-3xl mb-3">🗑️</div>
-            <h2 className={`text-base font-medium mb-1 ${dark ? "text-zinc-100" : "text-zinc-800"}`}>Delete task?</h2>
+            <h2 className={`text-base font-medium mb-1 ${textMain}`}>Delete task?</h2>
             <p className={`text-xs ${subText} mb-6`}>"{tasks.find(t => t.id === deleteConfirm)?.name}"</p>
             <div className="flex gap-2">
-              <button onClick={() => setDeleteConfirm(null)} className={`flex-1 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-300 hover:bg-zinc-800" : "border-zinc-200 text-zinc-600 hover:bg-zinc-100"} text-sm font-medium transition-colors`}>Keep</button>
+              <button onClick={() => setDeleteConfirm(null)} className={`flex-1 py-2.5 rounded-lg border ${pillBorder} ${textBody} ${hoverPanel} text-sm font-medium transition-colors`}>Keep</button>
               <button onClick={() => deleteTask(deleteConfirm)} className="flex-1 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">Delete</button>
             </div>
           </div>
@@ -739,7 +865,7 @@ export default function App() {
               <>
                 <div className="flex items-start justify-between mb-4">
                   <div>
-                    <h2 className={`text-base font-medium ${dark ? "text-zinc-100" : "text-zinc-800"}`}>{longPressTask.name}</h2>
+                    <h2 className={`text-base font-medium ${textMain}`}>{longPressTask.name}</h2>
                     <p className={`text-xs ${subText} mt-0.5`}>{getFrequencyLabel(longPressTask.frequencyDays)}</p>
                   </div>
                   {getCat(longPressTask.categoryId) && (
@@ -748,36 +874,36 @@ export default function App() {
                     </span>
                   )}
                 </div>
-                <div className={`space-y-3 text-sm ${dark ? "text-zinc-300" : "text-zinc-600"}`}>
-                  <div className={`flex justify-between py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
+                <div className={`space-y-3 text-sm ${textBody}`}>
+                  <div className={`flex justify-between py-2 border-b ${cardLineCls}`}>
                     <span className={subText}>Status</span><span>{getDueLabel(longPressTask)}</span>
                   </div>
-                  <div className={`flex justify-between py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
+                  <div className={`flex justify-between py-2 border-b ${cardLineCls}`}>
                     <span className={subText}>Streak</span>
                     <span>{(longPressTask.streak || 0) > 0 ? `🔥 ${longPressTask.streak} in a row` : "No streak yet"}</span>
                   </div>
-                  <div className={`flex justify-between py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
+                  <div className={`flex justify-between py-2 border-b ${cardLineCls}`}>
                     <span className={subText}>Last completed</span>
                     <span>{longPressTask.lastCompleted ? formatDate(longPressTask.lastCompleted) : "Never"}</span>
                   </div>
-                  <div className={`flex justify-between py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
+                  <div className={`flex justify-between py-2 border-b ${cardLineCls}`}>
                     <span className={subText}>Created</span><span>{formatDate(longPressTask.createdAt)}</span>
                   </div>
                   {longPressTask.notes && (
-                    <div className={`py-2 border-b ${dark ? "border-zinc-800" : "border-zinc-100"}`}>
+                    <div className={`py-2 border-b ${cardLineCls}`}>
                       <span className={`${subText} block mb-1`}>Notes</span>
                       <span className="text-xs">{longPressTask.notes}</span>
                     </div>
                   )}
                 </div>
                 <div className="flex gap-2 mt-5">
-                  <button onClick={() => setLongPressTask(null)} className={`flex-1 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-100"} text-sm transition-colors`}>Close</button>
+                  <button onClick={() => setLongPressTask(null)} className={`flex-1 py-2.5 rounded-lg border ${pillBorder} ${mutedText} ${hoverPanel} text-sm transition-colors`}>Close</button>
                   <button onClick={() => setEditMode(true)} className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Edit</button>
                 </div>
               </>
             ) : (
               <>
-                <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${dark ? "text-zinc-100" : "text-zinc-800"}`}>EDIT TASK</h2>
+                <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${textMain}`}>EDIT TASK</h2>
                 <div className="space-y-4">
                   <div>
                     <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Task name</label>
@@ -786,15 +912,15 @@ export default function App() {
                   </div>
                   <div>
                     <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Frequency</label>
-                    <div className={`flex items-center gap-2 mb-2 p-2.5 rounded-lg border cursor-pointer ${editFreqMode === "custom" ? "border-emerald-500 bg-emerald-950/20" : dark ? "border-zinc-700" : "border-zinc-200"}`}
+                    <div className={`flex items-center gap-2 mb-2 p-2.5 rounded-lg border cursor-pointer ${editFreqMode === "custom" ? "border-emerald-500 bg-emerald-950/20" : pillBorder}`}
                       onClick={() => setEditFreqMode("custom")}>
                       <input type="radio" readOnly checked={editFreqMode === "custom"} className="accent-emerald-500" />
-                      <span className={`text-sm ${dark ? "text-zinc-300" : "text-zinc-700"}`}>Every</span>
+                      <span className={`text-sm ${textBody}`}>Every</span>
                       <input type="number" min="1" max="365" value={editCustomDays}
                         onClick={e => { e.stopPropagation(); setEditFreqMode("custom"); }}
                         onChange={e => setEditCustomDays(Number(e.target.value))}
                         className={`w-16 border rounded px-2 py-1 text-sm text-center focus:outline-none ${inputCls}`} />
-                      <span className={`text-sm ${dark ? "text-zinc-300" : "text-zinc-700"}`}>days</span>
+                      <span className={`text-sm ${textBody}`}>days</span>
                     </div>
                     <select value={editFreqMode === "preset" ? editFreqPreset : ""}
                       onChange={e => { setEditFreqMode("preset"); setEditFreqPreset(Number(e.target.value)); }}
@@ -806,12 +932,12 @@ export default function App() {
                   <div>
                     <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Category</label>
                     <div className="flex flex-wrap gap-2">
-                      <button onClick={() => setEditCatId(null)} className={`px-2.5 py-1 rounded-lg text-xs border ${!editCatId ? "border-emerald-500 text-emerald-400" : dark ? "border-zinc-700 text-zinc-500" : "border-zinc-200 text-zinc-400"}`}>None</button>
+                      <button onClick={() => setEditCatId(null)} className={`px-2.5 py-1 rounded-lg text-xs border ${!editCatId ? "border-emerald-500 text-emerald-400" : `${pillBorder} ${mutedText}`}`}>None</button>
                       {categories.map(cat => (
                         <button key={cat.id} onClick={() => setEditCatId(cat.id)}
-                          className={`px-2.5 py-1 rounded-lg text-xs border flex items-center gap-1.5 ${editCatId === cat.id ? "border-emerald-500" : dark ? "border-zinc-700" : "border-zinc-200"}`}>
+                          className={`px-2.5 py-1 rounded-lg text-xs border flex items-center gap-1.5 ${editCatId === cat.id ? "border-emerald-500" : pillBorder}`}>
                           <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
-                          <span className={dark ? "text-zinc-300" : "text-zinc-600"}>{cat.name}</span>
+                          <span className={textBody}>{cat.name}</span>
                         </button>
                       ))}
                     </div>
@@ -824,7 +950,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex gap-2 mt-5">
-                  <button onClick={() => setEditMode(false)} className={`flex-1 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-100"} text-sm transition-colors`}>Back</button>
+                  <button onClick={() => setEditMode(false)} className={`flex-1 py-2.5 rounded-lg border ${pillBorder} ${mutedText} ${hoverPanel} text-sm transition-colors`}>Back</button>
                   <button onClick={saveEdit} className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Save</button>
                 </div>
               </>
@@ -836,8 +962,8 @@ export default function App() {
       {/* ── Add Category Modal ── */}
       {showAddCat && (
         <Modal onClose={() => setShowAddCat(false)}>
-          <div className={`${modalBg} border rounded-2xl p-6`} style={{ zIndex: 60 }}>
-            <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${dark ? "text-zinc-100" : "text-zinc-800"}`}>NEW CATEGORY</h2>
+          <div className={`${modalBg} border rounded-2xl p-6`}>
+            <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${textMain}`}>NEW CATEGORY</h2>
             <div className="space-y-4">
               <div>
                 <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Name</label>
@@ -847,13 +973,7 @@ export default function App() {
               </div>
               <div>
                 <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Colour</label>
-                <div className="grid grid-cols-8 gap-2">
-                  {COLOR_OPTIONS.map(c => (
-                    <button key={c} onClick={() => setNewCatColor(c)}
-                      className={`w-7 h-7 rounded-full border-2 transition-all ${newCatColor === c ? "border-white scale-110" : "border-transparent"}`}
-                      style={{ backgroundColor: c }} />
-                  ))}
-                </div>
+                <ColourPicker value={newCatColor} onChange={setNewCatColor} />
                 <div className="flex items-center gap-2 mt-3">
                   <div className="w-6 h-6 rounded-full" style={{ backgroundColor: newCatColor }} />
                   <span className={`text-xs ${subText}`}>{newCatName || "Preview"}</span>
@@ -861,8 +981,161 @@ export default function App() {
               </div>
             </div>
             <div className="flex gap-2 mt-6">
-              <button onClick={() => setShowAddCat(false)} className={`flex-1 py-2.5 rounded-lg border ${dark ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-100"} text-sm transition-colors`}>Cancel</button>
+              <button onClick={() => setShowAddCat(false)} className={`flex-1 py-2.5 rounded-lg border ${pillBorder} ${mutedText} ${hoverPanel} text-sm transition-colors`}>Cancel</button>
               <button onClick={addCategory} disabled={!newCatName.trim()} className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-sm font-medium transition-colors">Create</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Categories Manager Modal (large) ── */}
+      {showCatManager && !editingCat && (
+        <Modal onClose={() => setShowCatManager(false)}>
+          <div className={`${modalBg} border`} style={{ maxHeight: "85vh", overflowY: "auto" }}>
+            <div className="p-6 pb-0">
+              <div className="flex items-center justify-between mb-4">
+                <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl ${textMain}`}>CATEGORIES</h2>
+                <button onClick={() => setShowAddCat(true)}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white transition-colors">
+                  + New
+                </button>
+              </div>
+
+              <div className="space-y-2 mb-4">
+                {categories.length === 0 && <p className={`text-xs ${mutedText} text-center py-2`}>No categories yet</p>}
+                {categories.map(cat => (
+                  <div key={cat.id} className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border ${cardLineCls} ${dark ? "bg-zinc-800/40" : "bg-zinc-50"}`}>
+                    <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
+                    <span className={`text-sm flex-1 ${textBody}`}>{cat.name}</span>
+                    <span className={`text-xs ${mutedText}`}>{tasks.filter(t => t.categoryId === cat.id).length} tasks</span>
+                    <button onClick={() => openEditCat(cat)}
+                      className={`text-xs ${mutedText} hover:text-emerald-400 transition-colors px-1`}>
+                      ✏️
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-3 mb-3">
+                <div className={`flex-1 h-px ${dark ? "bg-zinc-800" : "bg-zinc-200"}`} />
+                <button onClick={() => setShowTaskAssign(v => !v)}
+                  className={`text-xs ${mutedText} hover:text-emerald-400 transition-colors whitespace-nowrap flex items-center gap-1`}>
+                  {showTaskAssign ? "∧" : "+"} Assign tasks
+                </button>
+                <div className={`flex-1 h-px ${dark ? "bg-zinc-800" : "bg-zinc-200"}`} />
+              </div>
+            </div>
+
+            {showTaskAssign && (
+              <div className="px-6 pb-4 space-y-4">
+                {uncatTasks.length > 0 && (
+                  <div>
+                    <p className={`text-xs ${mutedText} uppercase tracking-wider mb-2`}>Uncategorised</p>
+                    <div className="space-y-1">
+                      {uncatTasks.map(task => (
+                        <div key={task.id}>
+                          <button onClick={() => setAssigningTask(assigningTask === task.id ? null : task.id)}
+                            className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors flex items-center justify-between
+                              ${assigningTask === task.id ? "border-emerald-600 bg-emerald-950/20" : `${cardLineCls} hover:border-zinc-500 ${textBody}`}`}>
+                            <span>{task.name}</span>
+                            <span className={`${mutedText} text-xs`}>{assigningTask === task.id ? "∧" : "+"}</span>
+                          </button>
+                          {assigningTask === task.id && (
+                            <div className="mt-1 pl-2 flex flex-wrap gap-1.5">
+                              {categories.map(cat => (
+                                <button key={cat.id} onClick={() => assignCat(task.id, cat.id)}
+                                  className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border ${pillBorder} hover:border-emerald-600 transition-colors`}>
+                                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
+                                  <span className={`text-xs ${textBody}`}>{cat.name}</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {uncatTasks.length === 0 && (
+                  <p className={`text-xs ${mutedText} text-center py-2`}>All tasks have a category ✓</p>
+                )}
+
+                {catGroups.map(({ cat, tasks: grpTasks }) => (
+                  <div key={cat.id}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
+                      <p className={`text-xs ${mutedText} uppercase tracking-wider`}>{cat.name}</p>
+                    </div>
+                    <div className="space-y-1">
+                      {grpTasks.map(task => (
+                        <div key={task.id}>
+                          <button onClick={() => setAssigningTask(assigningTask === task.id ? null : task.id)}
+                            className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors flex items-center justify-between
+                              ${assigningTask === task.id ? "border-emerald-600 bg-emerald-950/20" : `${cardLineCls} hover:border-zinc-500`}`}>
+                            <span className={textBody}>{task.name}</span>
+                            <span className={`${mutedText} text-xs`}>{assigningTask === task.id ? "∧" : "✎"}</span>
+                          </button>
+                          {assigningTask === task.id && (
+                            <div className="mt-1 pl-2 flex flex-wrap gap-1.5">
+                              <button onClick={() => assignCat(task.id, null)}
+                                className={`px-2 py-1 rounded-lg border ${pillBorder} hover:border-red-700 text-xs ${mutedText} hover:text-red-400 transition-colors`}>
+                                Clear
+                              </button>
+                              {categories.filter(c => c.id !== task.categoryId).map(c => (
+                                <button key={c.id} onClick={() => assignCat(task.id, c.id)}
+                                  className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border ${pillBorder} hover:border-emerald-600 transition-colors`}>
+                                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: c.color }} />
+                                  <span className={`text-xs ${textBody}`}>{c.name}</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="px-6 pb-6 pt-2">
+              <button onClick={() => setShowCatManager(false)}
+                className={`w-full py-2.5 rounded-lg border ${pillBorder} ${mutedText} ${hoverPanel} text-sm transition-colors`}>
+                Done
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Edit Category Modal (from manager) ── */}
+      {editingCat && (
+        <Modal onClose={() => setEditingCat(null)}>
+          <div className={`${modalBg} border rounded-2xl p-6`}>
+            <h2 style={{ fontFamily: "'Bebas Neue', sans-serif", letterSpacing: "0.05em" }} className={`text-2xl mb-4 ${textMain}`}>EDIT CATEGORY</h2>
+            <div className="space-y-4">
+              <div>
+                <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Name</label>
+                <input value={editCatName} onChange={e => setEditCatName(e.target.value)}
+                  className={`w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none transition-colors ${inputCls}`} />
+              </div>
+              <div>
+                <label className={`block text-xs ${subText} mb-1.5 uppercase tracking-wider`}>Colour</label>
+                <ColourPicker value={editCatColor} onChange={setEditCatColor} />
+                <div className="flex items-center gap-2 mt-3">
+                  <div className="w-6 h-6 rounded-full" style={{ backgroundColor: editCatColor }} />
+                  <span className={`text-xs ${subText}`}>{editCatName || "Preview"}</span>
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-6">
+              <button onClick={() => deleteCat(editingCat.id)}
+                className="py-2.5 px-3 rounded-lg border border-red-800 text-red-400 text-sm hover:bg-red-950/40 transition-colors">
+                Delete
+              </button>
+              <button onClick={() => setEditingCat(null)} className={`flex-1 py-2.5 rounded-lg border ${pillBorder} ${mutedText} ${hoverPanel} text-sm transition-colors`}>Cancel</button>
+              <button onClick={saveEditCat} className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Save</button>
             </div>
           </div>
         </Modal>
