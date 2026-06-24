@@ -1,0 +1,8 @@
+{
+  "short_name": "MyRoutine",
+  "name": "MyRoutine - Task Tracker",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#09090b",
+  "background_color": "#09090b"
+}
